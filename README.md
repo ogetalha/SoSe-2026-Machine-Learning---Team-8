@@ -14,9 +14,10 @@ If the student node is not connected, the lab demo stays in manual control.
 ## Quick Start (Student Path)
 
 1. Clone and enter repo.
-
-git clone https://github.com/AAT24/student_lineFollowing_HSHL.git
-cd student_lineFollowing_HSHL
+```bash
+git clone https://github.com/Mahmud-cse/Machine_Learning_Line_Follower.git
+cd Machine_Learning_Line_Follower
+```
 
 2. Place the instructor bag in bags/. The folder must contain metadata.yaml and .db3.
 
@@ -101,3 +102,12 @@ Before submission, confirm:
 - line-follower receives camera frames
 - steering.csv has status ok rows and steer values
 - your steering direction is correct (left line -> negative steer, right line -> positive steer)
+
+## SVM Machine Learning Implementation
+This project uses an OpenCV image processing pipeline combined with a **Support Vector Machine (SVM)** to perform robust, smooth steering controls.
+
+* **Model Classifier**: SVC (Support Vector Classifier) with an RBF (Radial Basis Function) kernel.
+* **Hyper-parameters**: `C=5.0`, `gamma=0.05` (Optimized via Grid Search).
+* **Model Accuracy**: **91.76%** on test split validation.
+* **Steering Output Heuristic**: Smoothened continuous output command calculated via class prediction probabilities:
+  $$\text{Steering} = P(\text{Steer Right}) - P(\text{Steer Left})$$
