@@ -1,0 +1,70 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="fs2VUAQINLPDR3hs9z-K">
+    <mxGraphModel dx="1245" dy="659" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=16;fontStyle=1;" value="&lt;b&gt;Use Case Diagram&lt;/b&gt;&lt;br&gt;Communication Loss in Truck Platoon" vertex="1">
+          <mxGeometry height="40" width="420" x="370" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="boundary" parent="1" style="swimlane;html=1;rounded=0;whiteSpace=wrap;strokeColor=#000000;fillColor=#ffffff;fontSize=14;startSize=30;" value="&lt;b&gt;Affected Follow Truck&lt;/b&gt;" vertex="1">
+          <mxGeometry height="440" width="500" x="330" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="UC1" parent="1" style="ellipse;whiteSpace=wrap;html=1;strokeColor=#000000;fillColor=#ffffff;fontSize=12;" value="Handle&lt;br&gt;Communication Loss" vertex="1">
+          <mxGeometry height="70" width="160" x="480" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="UC2" parent="1" style="ellipse;whiteSpace=wrap;html=1;strokeColor=#000000;fillColor=#ffffff;fontSize=12;" value="Notify&lt;br&gt;Platoon" vertex="1">
+          <mxGeometry height="60" width="140" x="420" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="UC3" parent="1" style="ellipse;whiteSpace=wrap;html=1;strokeColor=#000000;fillColor=#ffffff;fontSize=12;" value="Request&lt;br&gt;Rejoin" vertex="1">
+          <mxGeometry height="60" width="140" x="600" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="UC4" parent="1" style="ellipse;whiteSpace=wrap;html=1;strokeColor=#000000;fillColor=#ffffff;fontSize=12;" value="Leave Platoon&lt;br&gt;Safely" vertex="1">
+          <mxGeometry height="60" width="150" x="510" y="430" as="geometry" />
+        </mxCell>
+        <mxCell id="E1" edge="1" parent="1" style="endArrow=classicThin;html=1;rounded=0;strokeWidth=1.5;endFill=1;" target="UC1" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="140" y="223.66666666666663" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E2" edge="1" parent="1" style="endArrow=classicThin;html=1;rounded=0;strokeWidth=1.5;endFill=1;" target="UC3" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="140" y="231.16071428571433" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E3" edge="1" parent="1" style="endArrow=classicThin;html=1;rounded=0;strokeWidth=1.5;endFill=1;" target="UC2" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="140" y="399.8684210526317" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E4" edge="1" parent="1" style="endArrow=classicThin;html=1;rounded=0;strokeWidth=1.5;endFill=1;" target="UC1" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="930" y="279" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E5" edge="1" parent="1" source="UC1" style="endArrow=open;html=1;rounded=0;strokeWidth=1.2;dashed=1;" target="UC2" value="">
+          <mxGeometry relative="1" x="-0.0085" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E6" edge="1" parent="1" source="UC1" style="endArrow=open;html=1;rounded=0;strokeWidth=1.2;dashed=1;" target="UC3" value="">
+          <mxGeometry relative="1" x="0.0091" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E7" edge="1" parent="1" source="UC1" style="endArrow=open;html=1;rounded=0;strokeWidth=1.2;dashed=1;" target="UC4" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="dbGQZVIQO0utTPjPPNdG-16" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Lead Truck" vertex="1">
+          <mxGeometry height="60" width="120" x="20" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="dbGQZVIQO0utTPjPPNdG-19" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="&lt;span style=&quot;caret-color: rgba(0, 0, 0, 0); white-space: nowrap;&quot;&gt;Other Follow Trucks&lt;/span&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="20" y="370" as="geometry" />
+        </mxCell>
+        <mxCell id="dbGQZVIQO0utTPjPPNdG-22" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="&lt;span style=&quot;caret-color: rgba(0, 0, 0, 0); white-space: nowrap;&quot;&gt;Fleet Operator&lt;/span&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="930" y="250" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
