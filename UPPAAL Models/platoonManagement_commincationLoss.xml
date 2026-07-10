@@ -1,0 +1,764 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.6//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_6.dtd'>
+<nta>
+	<declaration>
+// ===== Constants -- each traced to one requirement =====
+const int MAX_TRUCKS = 4;             // platoon capacity (2 followers instantiated)
+const int NOTIFICATION_LATENCY = 100; // ms (REQ-1.5.1)
+const int V2X_CYCLE = 20;             // ms = 50 Hz data exchange (REQ-1.2.3)
+const int SYNC_TIMEOUT = 3000;        // ms (REQ-1.3.2): speed sync completes within 3 s
+const int GAP_CLOSE_TIMEOUT = 5000;   // ms (REQ-1.6.2): gap closed within 5 s
+
+typedef int[0, MAX_TRUCKS-1] truck_id;
+
+// ===== Channels =====
+// Truck -&gt; Lead
+chan joinRequest[MAX_TRUCKS];
+chan leaveRequest[MAX_TRUCKS];
+chan exitConfirmed[MAX_TRUCKS];
+chan syncFailed[MAX_TRUCKS];      // state machine: syncFailed()/abortJoin()
+chan gapClosed;                   // state machine: gapClosed()/confirmFormation()
+
+// Lead -&gt; SafetyOperator
+chan requestApproval[MAX_TRUCKS];
+
+// SafetyOperator -&gt; Lead AND Truck (broadcast: both hear one decision)
+broadcast chan operatorApproves[MAX_TRUCKS];
+broadcast chan operatorRejects[MAX_TRUCKS];
+
+// Lead -&gt; Truck
+chan conditionsSafe[MAX_TRUCKS];
+chan conditionsUnsafe[MAX_TRUCKS];
+chan linkEstablished[MAX_TRUCKS];
+chan speedSynced[MAX_TRUCKS];
+broadcast chan predecessorLeft;   // state machine: predecessorLeft()/calculateNewGap() -- remaining member closes the gap
+
+// ===== Shared state =====
+int[0, MAX_TRUCKS] members = 0;       // platoon member count, maintained by the lead
+bool isPlatoonLocked = false;         // == members &gt; 0, maintained by the lead
+int[0, 50] current_gap = 50;          // m (REQ-1.1.2)
+int[-10, 10] speed_dev[MAX_TRUCKS];   // scaled x10: +/-5 == +/-0.5 m/s (REQ-1.3.1)
+
+// Simplification kept: the lead coordinates one join/leave maneuver at a time,
+// but the platoon may now hold multiple members -- so when one member leaves,
+// the remaining member closes the gap (ClosingGap inside Active Platooning,
+// per the state machine). REQ-1.6.1's separate 500 ms begin-bound is out of scope.
+
+// ===== Communication-loss scenario (merged from truck_platoon_uppaal.xml, generalized to N trucks) =====
+// Scope: the watchdog only monitors ACTIVE_PLATOONING_SteadyState -- the ordinary
+// cruising state. Comm loss during the short, already-timed ClosingGap maneuver is
+// out of scope for this iteration, same trade-off style as REQ-1.6.1 above.
+const int COMM_TIMEOUT = 3 * V2X_CYCLE; // ms: 3 missed 50 Hz heartbeats =&gt; link declared lost
+const int SAFE_MODE_DELAY = 20;         // ms: must fall back to independent/safe driving within this bound
+const int RECONNECT_LIMIT = 100;        // abstract reconnection-window ceiling. Distance/attempt-driven,
+                                         // so a small ceiling is exact for the untimed reachability props
+                                         // (same trade-off as GAP_CLOSE_TIMEOUT). Kept well above
+                                         // SAFE_MODE_DELAY and small enough to keep the zone graph tight.
+
+broadcast chan heartbeat;         // Lead -&gt; all current members: single shared V2X beacon
+broadcast chan commWarning[MAX_TRUCKS]; // Follower[id] -&gt; SafetyOperator: loss detected (monitoring only)
+broadcast chan commRejoin[MAX_TRUCKS];  // Follower[id] -&gt; SafetyOperator: link recovered (monitoring only)
+chan commGiveUp[MAX_TRUCKS];      // Follower[id] -&gt; Lead: reconnection window expired, unilateral exit
+                                   // (non-broadcast: reuses the serialized handshake pattern, so it
+                                   // blocks until the lead is back in PlatoonSteadyState)
+
+bool isMember[MAX_TRUCKS];        // true once truck id has completed JOINING, false once it has exited
+
+// ===== Maneuver serialization (prevents the comm-loss / voluntary-leave interleaving deadlock) =====
+// A comm-lost member is still counted in the platoon, but it is NOT in SteadyState, so it cannot
+// perform the gap-closing handshake the lead expects after a voluntary leave. We therefore make the
+// two maneuvers mutually exclusive: a coordinated decouple never starts while any member is handling
+// comm loss, and comm-loss handling never starts mid-decouple. This is also realistic -- you stabilize
+// a comms fault before running a coordinated leave. A truck giving up on reconnection exits WITHOUT
+// gap closing (there is, by definition, no link to coordinate that maneuver over).
+int[0, MAX_TRUCKS] commActive = 0;  // number of members currently handling comm loss
+bool leaveInProgress = false;       // a coordinated voluntary-leave maneuver is underway
+	</declaration>
+	<template>
+		<name x="5" y="5">FollowerTruck</name>
+		<parameter>const truck_id id</parameter>
+		<declaration>
+clock t;       // deadline clock for the current phase
+clock v2x_clk; // 50 Hz heartbeat (REQ-1.2.3)
+clock ct;      // comm-loss watchdog clock (separate from v2x_clk/t -- see COMM_* states below)
+		</declaration>
+		<location id="id0" x="0" y="-500">
+			<name x="17" y="-531">Idle</name>
+		</location>
+		<location id="id1" x="-500" y="-300">
+			<name x="-484" y="-314">JOINING_JoinRequested</name>
+		</location>
+		<location id="id2" x="-500" y="-150">
+			<name x="-480" y="-165">JOINING_ValidatingConditions</name>
+			<label kind="invariant" x="-480" y="-140">t &lt;= NOTIFICATION_LATENCY</label>
+		</location>
+		<location id="id3" x="-500" y="0">
+			<name x="-730" y="-15">JOINING_EstablishingLink</name>
+		</location>
+		<location id="id4" x="-500" y="150">
+			<name x="-480" y="135">JOINING_SynchronizingSpeed</name>
+			<label kind="invariant" x="-480" y="160">t &lt;= SYNC_TIMEOUT &amp;&amp; v2x_clk &lt;= V2X_CYCLE</label>
+		</location>
+		<location id="id5" x="0" y="350">
+			<name x="-119" y="289">ACTIVE_PLATOONING_SteadyState</name>
+			<label kind="invariant" x="-85" y="272">v2x_clk &lt;= V2X_CYCLE</label>
+		</location>
+		<location id="id6" x="-350" y="550">
+			<name x="-450" y="569">ACTIVE_PLATOONING_ClosingGap</name>
+			<label kind="invariant" x="-510" y="586">t &lt;= GAP_CLOSE_TIMEOUT &amp;&amp; v2x_clk &lt;= V2X_CYCLE</label>
+		</location>
+		<location id="id7" x="500" y="150">
+			<name x="408" y="161">LEAVING_LeaveRequested</name>
+		</location>
+		<location id="id8" x="500" y="0">
+			<name x="525" y="-15">LEAVING_ValidatingExit</name>
+		</location>
+		<location id="id9" x="500" y="-300">
+			<name x="425" y="-331">LEAVING_ExecutingExit</name>
+		</location>
+		<location id="id10" x="150" y="550">
+			<name x="175" y="535">COMM_LinkLost</name>
+			<label kind="invariant" x="175" y="560">ct &lt;= SAFE_MODE_DELAY</label>
+		</location>
+		<location id="id11" x="150" y="750">
+			<name x="25" y="722">COMM_SafeMode</name>
+			<label kind="invariant" x="-42" y="739">ct &lt;= RECONNECT_LIMIT</label>
+		</location>
+		<location id="id12" x="450" y="550">
+			<name x="475" y="535">COMM_Rejoining</name>
+			<committed/>
+		</location>
+		<location id="id13" x="750" y="650">
+			<name x="705" y="620">COMM_GiveUp</name>
+		</location>
+		<location id="id14" x="450" y="750">
+			<name x="382" y="765">COMM_RecoveryDecision</name>
+			<committed/>
+		</location>
+		<init ref="id0"/>
+		<transition id="id15">
+			<source ref="id0"/>
+			<target ref="id1"/>
+			<label kind="synchronisation" x="-501" y="-416">joinRequest[id]!</label>
+			<label kind="assignment" x="-501" y="-433">t = 0, speed_dev[id] = 0</label>
+			<nail x="-500" y="-500"/>
+		</transition>
+		<transition id="id16">
+			<source ref="id1"/>
+			<target ref="id2"/>
+			<label kind="synchronisation" x="-480" y="-265">operatorApproves[id]?</label>
+			<label kind="assignment" x="-480" y="-240">t = 0</label>
+		</transition>
+		<transition id="id17">
+			<source ref="id1"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-629" y="-569">operatorRejects[id]?</label>
+			<nail x="-650" y="-300"/>
+			<nail x="-650" y="-550"/>
+			<nail x="0" y="-550"/>
+		</transition>
+		<transition id="id18">
+			<source ref="id2"/>
+			<target ref="id3"/>
+			<label kind="synchronisation" x="-501" y="-93">conditionsSafe[id]?</label>
+			<label kind="assignment" x="-501" y="-68">t = 0</label>
+		</transition>
+		<transition id="id19">
+			<source ref="id2"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-790" y="-220">conditionsUnsafe[id]?</label>
+			<nail x="-800" y="-150"/>
+			<nail x="-800" y="-500"/>
+		</transition>
+		<transition id="id20">
+			<source ref="id3"/>
+			<target ref="id4"/>
+			<label kind="synchronisation" x="-480" y="45">linkEstablished[id]?</label>
+			<label kind="assignment" x="-480" y="70">t = 0, v2x_clk = 0</label>
+		</transition>
+		<transition id="id21">
+			<source ref="id4"/>
+			<target ref="id4"/>
+			<label kind="select" x="-892" y="221">v : int[-5,5]</label>
+			<label kind="guard" x="-892" y="246">v2x_clk == V2X_CYCLE</label>
+			<label kind="assignment" x="-892" y="271">speed_dev[id] = v, v2x_clk = 0</label>
+			<nail x="-688" y="178"/>
+			<nail x="-684" y="234"/>
+			<nail x="-680" y="356"/>
+		</transition>
+		<transition id="id22">
+			<source ref="id4"/>
+			<target ref="id0"/>
+			<label kind="guard" x="-940" y="-120">t == SYNC_TIMEOUT &amp;&amp; speed_dev[id] != 0</label>
+			<label kind="synchronisation" x="-940" y="-95">syncFailed[id]!</label>
+			<nail x="-950" y="150"/>
+			<nail x="-950" y="-600"/>
+			<nail x="0" y="-600"/>
+		</transition>
+		<transition id="id23">
+			<source ref="id4"/>
+			<target ref="id5"/>
+			<label kind="guard" x="-470" y="245">speed_dev[id] == 0</label>
+			<label kind="synchronisation" x="-470" y="270">speedSynced[id]?</label>
+			<label kind="assignment" x="-470" y="295">v2x_clk = 0, ct = 0</label>
+			<nail x="-300" y="150"/>
+			<nail x="-300" y="350"/>
+		</transition>
+		<transition id="id24">
+			<source ref="id5"/>
+			<target ref="id5"/>
+			<label kind="guard" x="-238" y="314">v2x_clk == V2X_CYCLE</label>
+			<label kind="assignment" x="-238" y="297">v2x_clk = 0</label>
+			<nail x="-120" y="300"/>
+			<nail x="-119" y="357"/>
+			<nail x="-120" y="400"/>
+		</transition>
+		<transition id="id25">
+			<source ref="id5"/>
+			<target ref="id6"/>
+			<label kind="synchronisation" x="-306" y="374">predecessorLeft?</label>
+			<label kind="assignment" x="-221" y="391">t = 0</label>
+			<nail x="-180" y="350"/>
+			<nail x="-180" y="550"/>
+		</transition>
+		<transition id="id26">
+			<source ref="id6"/>
+			<target ref="id6"/>
+			<label kind="guard" x="-893" y="607">v2x_clk == V2X_CYCLE</label>
+			<label kind="assignment" x="-893" y="632">v2x_clk = 0</label>
+			<nail x="-697" y="527"/>
+			<nail x="-693" y="557"/>
+			<nail x="-697" y="688"/>
+		</transition>
+		<transition id="id27">
+			<source ref="id6"/>
+			<target ref="id5"/>
+			<label kind="guard" x="-323" y="663">t &lt;= GAP_CLOSE_TIMEOUT</label>
+			<label kind="synchronisation" x="-323" y="680">gapClosed!</label>
+			<label kind="assignment" x="-323" y="697">current_gap = 4, ct = 0</label>
+			<nail x="-348" y="663"/>
+			<nail x="-102" y="663"/>
+			<nail x="-100" y="400"/>
+		</transition>
+		<transition id="id28">
+			<source ref="id5"/>
+			<target ref="id7"/>
+			<label kind="guard" x="187" y="161">commActive == 0</label>
+			<label kind="synchronisation" x="187" y="186">leaveRequest[id]!</label>
+			<label kind="assignment" x="187" y="211">t = 0</label>
+			<nail x="250" y="350"/>
+			<nail x="250" y="150"/>
+		</transition>
+		<transition id="id29">
+			<source ref="id7"/>
+			<target ref="id8"/>
+			<label kind="synchronisation" x="501" y="77">operatorApproves[id]?</label>
+			<label kind="assignment" x="501" y="102">t = 0</label>
+		</transition>
+		<transition id="id30">
+			<source ref="id7"/>
+			<target ref="id5"/>
+			<label kind="synchronisation" x="660" y="215">operatorRejects[id]?</label>
+			<label kind="assignment" x="660" y="240">v2x_clk = 0</label>
+			<nail x="650" y="150"/>
+			<nail x="650" y="350"/>
+		</transition>
+		<transition id="id31">
+			<source ref="id8"/>
+			<target ref="id9"/>
+			<label kind="synchronisation" x="520" y="-165">conditionsSafe[id]?</label>
+			<label kind="assignment" x="520" y="-140">t = 0</label>
+		</transition>
+		<transition id="id32">
+			<source ref="id8"/>
+			<target ref="id5"/>
+			<label kind="synchronisation" x="289" y="34">conditionsUnsafe[id]?</label>
+			<label kind="assignment" x="289" y="59">v2x_clk = 0</label>
+			<nail x="350" y="0"/>
+			<nail x="350" y="350"/>
+		</transition>
+		<transition id="id33">
+			<source ref="id9"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="910" y="-420">exitConfirmed[id]!</label>
+			<label kind="assignment" x="910" y="-395">speed_dev[id] = 0, isMember[id] = false</label>
+			<nail x="900" y="-300"/>
+			<nail x="900" y="-500"/>
+			<nail x="0" y="-500"/>
+		</transition>
+		<transition id="id34">
+			<source ref="id5"/>
+			<target ref="id5"/>
+			<label kind="synchronisation" x="93" y="323">heartbeat?</label>
+			<label kind="assignment" x="127" y="314">ct = 0</label>
+			<nail x="120" y="300"/>
+			<nail x="119" y="348"/>
+			<nail x="120" y="400"/>
+		</transition>
+		<transition id="id35">
+			<source ref="id5"/>
+			<target ref="id10"/>
+			<label kind="guard" x="51" y="460">ct &gt;= COMM_TIMEOUT &amp;&amp; !leaveInProgress</label>
+			<label kind="synchronisation" x="51" y="485">commWarning[id]!</label>
+			<label kind="assignment" x="51" y="510">ct = 0, commActive++</label>
+			<nail x="150" y="350"/>
+		</transition>
+		<transition id="id36">
+			<source ref="id10"/>
+			<target ref="id11"/>
+			<label kind="guard" x="153" y="646">ct &lt;= SAFE_MODE_DELAY</label>
+			<label kind="assignment" x="153" y="671">ct = 0</label>
+		</transition>
+		<transition id="id37">
+			<source ref="id12"/>
+			<target ref="id5"/>
+			<label kind="synchronisation" x="374" y="408">commRejoin[id]!</label>
+			<label kind="assignment" x="374" y="425">v2x_clk = 0, commActive--</label>
+			<nail x="450" y="450"/>
+			<nail x="0" y="450"/>
+		</transition>
+		<transition id="id38">
+			<source ref="id11"/>
+			<target ref="id13"/>
+			<label kind="guard" x="350" y="870">ct &gt;= RECONNECT_LIMIT</label>
+			<nail x="150" y="850"/>
+			<nail x="750" y="850"/>
+		</transition>
+		<transition id="id39">
+			<source ref="id13"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="965" y="40">commGiveUp[id]!</label>
+			<label kind="assignment" x="965" y="65">speed_dev[id] = 0, isMember[id] = false, commActive--</label>
+			<nail x="950" y="650"/>
+			<nail x="950" y="-650"/>
+			<nail x="0" y="-650"/>
+			<nail x="0" y="-500"/>
+		</transition>
+		<transition id="id40">
+			<source ref="id11"/>
+			<target ref="id14"/>
+			<label kind="synchronisation" x="255" y="731">heartbeat?</label>
+		</transition>
+		<transition id="id41">
+			<source ref="id14"/>
+			<target ref="id12"/>
+			<label kind="guard" x="416" y="612">ct &lt; RECONNECT_LIMIT</label>
+			<label kind="assignment" x="416" y="637">ct = 0</label>
+		</transition>
+		<transition id="id42">
+			<source ref="id14"/>
+			<target ref="id13"/>
+			<label kind="guard" x="518" y="714">ct &gt;= RECONNECT_LIMIT</label>
+			<nail x="600" y="750"/>
+			<nail x="600" y="650"/>
+		</transition>
+	</template>
+	<template>
+		<name x="5" y="5">LeadTruck</name>
+		<declaration>
+truck_id active_id; // truck whose join/leave is currently coordinated
+clock hb_clk;        // periodic V2X heartbeat timer (COMM_TIMEOUT scenario)
+		</declaration>
+		<location id="id43" x="-697" y="-102">
+			<name x="-757" y="-112">Idle</name>
+		</location>
+		<location id="id44" x="-350" y="-100">
+			<name x="-331" y="-85">AuthorizingJoin</name>
+		</location>
+		<location id="id45" x="-59" y="-102">
+			<name x="-153" y="-85">AwaitJoinDecision</name>
+		</location>
+		<location id="id46" x="225" y="-101">
+			<name x="102" y="-85">MonitorValidation</name>
+		</location>
+		<location id="id47" x="518" y="-102">
+			<name x="446" y="-86">ConfirmHandshake</name>
+		</location>
+		<location id="id48" x="824" y="-102">
+			<name x="833" y="-136">TrackSpeedSync</name>
+		</location>
+		<location id="id49" x="824" y="195">
+			<name x="850" y="187">PlatoonSteadyState</name>
+		</location>
+		<location id="id50" x="416" y="195">
+			<name x="361" y="215">AuthorizingLeave</name>
+		</location>
+		<location id="id51" x="150" y="197">
+			<name x="-8" y="212">AwaitLeaveDecision</name>
+		</location>
+		<location id="id52" x="-100" y="197">
+			<name x="-229" y="212">ValidatingLeave</name>
+		</location>
+		<location id="id53" x="-357" y="204">
+			<name x="-483" y="219">ExecutingLeave</name>
+		</location>
+		<location id="id54" x="-357" y="476">
+			<name x="-427" y="496">NotifyFormation</name>
+		</location>
+		<location id="id55" x="-102" y="476">
+			<name x="-162" y="496">AwaitGapClosure</name>
+		</location>
+		<location id="id56" x="-59" y="-493">
+			<name x="-145" y="-528">RouteJoinRejection</name>
+			<committed/>
+		</location>
+		<init ref="id43"/>
+		<transition id="id57">
+			<source ref="id43"/>
+			<target ref="id44"/>
+			<label kind="select" x="-578" y="-102">i : truck_id</label>
+			<label kind="synchronisation" x="-586" y="-85">joinRequest[i]?</label>
+			<label kind="assignment" x="-654" y="-68">active_id = i, current_gap = 50</label>
+		</transition>
+		<transition id="id58">
+			<source ref="id49"/>
+			<target ref="id44"/>
+			<label kind="select" x="-238" y="-8">i : truck_id</label>
+			<label kind="synchronisation" x="-246" y="8">joinRequest[i]?</label>
+			<label kind="assignment" x="-289" y="25">active_id = i, current_gap = 50</label>
+			<nail x="552" y="136"/>
+			<nail x="-348" y="51"/>
+		</transition>
+		<transition id="id59">
+			<source ref="id44"/>
+			<target ref="id45"/>
+			<label kind="synchronisation" x="-306" y="-127">requestApproval[active_id]!</label>
+		</transition>
+		<transition id="id60">
+			<source ref="id45"/>
+			<target ref="id46"/>
+			<label kind="synchronisation" x="-42" y="-127">operatorApproves[active_id]?</label>
+		</transition>
+		<transition id="id61">
+			<source ref="id46"/>
+			<target ref="id47"/>
+			<label kind="synchronisation" x="263" y="-127">conditionsSafe[active_id]!</label>
+		</transition>
+		<transition id="id62">
+			<source ref="id46"/>
+			<target ref="id43"/>
+			<label kind="guard" x="-561" y="-238">members == 0</label>
+			<label kind="synchronisation" x="-612" y="-221">conditionsUnsafe[active_id]!</label>
+			<nail x="107" y="-195"/>
+			<nail x="-663" y="-195"/>
+		</transition>
+		<transition id="id63">
+			<source ref="id46"/>
+			<target ref="id49"/>
+			<label kind="guard" x="204" y="-9">members &gt; 0</label>
+			<label kind="synchronisation" x="204" y="8">conditionsUnsafe[active_id]!</label>
+			<label kind="assignment" x="204" y="25">hb_clk = 0</label>
+		</transition>
+		<transition id="id64">
+			<source ref="id47"/>
+			<target ref="id48"/>
+			<label kind="synchronisation" x="552" y="-127">linkEstablished[active_id]!</label>
+		</transition>
+		<transition id="id65">
+			<source ref="id48"/>
+			<target ref="id49"/>
+			<label kind="synchronisation" x="833" y="-59">speedSynced[active_id]!</label>
+			<label kind="assignment" x="833" y="-34">members = members + 1, isPlatoonLocked = true, isMember[active_id] = true, hb_clk = 0</label>
+		</transition>
+		<transition id="id66">
+			<source ref="id48"/>
+			<target ref="id43"/>
+			<label kind="guard" x="442" y="-356">members == 0</label>
+			<label kind="synchronisation" x="408" y="-331">syncFailed[active_id]?</label>
+			<nail x="816" y="-306"/>
+			<nail x="493" y="-306"/>
+			<nail x="-697" y="-306"/>
+		</transition>
+		<transition id="id67">
+			<source ref="id48"/>
+			<target ref="id49"/>
+			<label kind="guard" x="637" y="8">members &gt; 0</label>
+			<label kind="synchronisation" x="637" y="25">syncFailed[active_id]?</label>
+			<label kind="assignment" x="637" y="42">hb_clk = 0</label>
+			<nail x="739" y="-60"/>
+			<nail x="739" y="110"/>
+		</transition>
+		<transition id="id68">
+			<source ref="id49"/>
+			<target ref="id50"/>
+			<label kind="select" x="493" y="153">j : truck_id</label>
+			<label kind="synchronisation" x="493" y="170">leaveRequest[j]?</label>
+			<label kind="assignment" x="501" y="204">active_id = j, leaveInProgress = true</label>
+		</transition>
+		<transition id="id69">
+			<source ref="id50"/>
+			<target ref="id51"/>
+			<label kind="synchronisation" x="178" y="170">requestApproval[active_id]!</label>
+		</transition>
+		<transition id="id70">
+			<source ref="id51"/>
+			<target ref="id52"/>
+			<label kind="synchronisation" x="-85" y="172">operatorApproves[active_id]?</label>
+		</transition>
+		<transition id="id71">
+			<source ref="id51"/>
+			<target ref="id49"/>
+			<label kind="synchronisation" x="348" y="289">operatorRejects[active_id]?</label>
+			<label kind="assignment" x="348" y="306">hb_clk = 0, leaveInProgress = false</label>
+			<nail x="153" y="289"/>
+			<nail x="773" y="289"/>
+		</transition>
+		<transition id="id72">
+			<source ref="id52"/>
+			<target ref="id53"/>
+			<label kind="synchronisation" x="-330" y="172">conditionsSafe[active_id]!</label>
+		</transition>
+		<transition id="id73">
+			<source ref="id52"/>
+			<target ref="id49"/>
+			<label kind="synchronisation" x="187" y="374">conditionsUnsafe[active_id]!</label>
+			<label kind="assignment" x="187" y="391">hb_clk = 0, leaveInProgress = false</label>
+			<nail x="-102" y="374"/>
+			<nail x="807" y="382"/>
+			<nail x="807" y="229"/>
+		</transition>
+		<transition id="id74">
+			<source ref="id53"/>
+			<target ref="id43"/>
+			<label kind="guard" x="-600" y="85">members == 1</label>
+			<label kind="synchronisation" x="-600" y="105">exitConfirmed[active_id]?</label>
+			<label kind="assignment" x="-600" y="125">members = 0, isPlatoonLocked = false, leaveInProgress = false</label>
+			<nail x="-620" y="150"/>
+		</transition>
+		<transition id="id75">
+			<source ref="id53"/>
+			<target ref="id54"/>
+			<label kind="guard" x="-340" y="262">members &gt; 1</label>
+			<label kind="synchronisation" x="-340" y="282">exitConfirmed[active_id]?</label>
+			<label kind="assignment" x="-340" y="302">members = members - 1</label>
+		</transition>
+		<transition id="id76">
+			<source ref="id54"/>
+			<target ref="id55"/>
+			<label kind="synchronisation" x="-320" y="342">predecessorLeft!</label>
+		</transition>
+		<transition id="id77">
+			<source ref="id55"/>
+			<target ref="id49"/>
+			<label kind="synchronisation" x="161" y="484">gapClosed?</label>
+			<label kind="assignment" x="161" y="501">hb_clk = 0, leaveInProgress = false</label>
+			<nail x="824" y="484"/>
+			<nail x="824" y="263"/>
+		</transition>
+		<transition id="id78">
+			<source ref="id49"/>
+			<target ref="id49"/>
+			<label kind="guard" x="1309" y="351">hb_clk &gt;= V2X_CYCLE</label>
+			<label kind="synchronisation" x="1309" y="371">heartbeat!</label>
+			<label kind="assignment" x="1309" y="391">hb_clk = 0</label>
+			<nail x="1309" y="433"/>
+			<nail x="1305" y="332"/>
+		</transition>
+		<transition id="id79">
+			<source ref="id49"/>
+			<target ref="id49"/>
+			<label kind="select" x="1317" y="121">i : truck_id</label>
+			<label kind="guard" x="1317" y="141">members == 1</label>
+			<label kind="synchronisation" x="1317" y="161">commGiveUp[i]?</label>
+			<label kind="assignment" x="1317" y="181">members = 0, isPlatoonLocked = false, hb_clk = 0</label>
+			<nail x="1309" y="102"/>
+			<nail x="1309" y="212"/>
+		</transition>
+		<transition id="id80">
+			<source ref="id49"/>
+			<target ref="id49"/>
+			<label kind="select" x="1320" y="232">i : truck_id</label>
+			<label kind="guard" x="1320" y="252">members &gt; 1</label>
+			<label kind="synchronisation" x="1317" y="272">commGiveUp[i]?</label>
+			<label kind="assignment" x="1317" y="292">members = members - 1, hb_clk = 0</label>
+			<nail x="1309" y="224"/>
+			<nail x="1309" y="314"/>
+		</transition>
+		<transition id="id81">
+			<source ref="id45"/>
+			<target ref="id56"/>
+			<label kind="synchronisation" x="-135" y="-215">operatorRejects[active_id]?</label>
+		</transition>
+		<transition id="id82">
+			<source ref="id56"/>
+			<target ref="id43"/>
+			<label kind="guard" x="-476" y="-170">members == 0</label>
+		</transition>
+		<transition id="id83">
+			<source ref="id56"/>
+			<target ref="id49"/>
+			<label kind="guard" x="471" y="-45">members &gt; 0</label>
+			<label kind="assignment" x="501" y="-25">hb_clk = 0</label>
+		</transition>
+	</template>
+	<template>
+		<name x="5" y="5">SafetyOperator</name>
+		<declaration>
+truck_id req_id;  // which truck the pending join/leave decision concerns
+		</declaration>
+		<location id="id84" x="0" y="0">
+			<name x="-10" y="-35">Idle</name>
+		</location>
+		<location id="id85" x="300" y="0">
+			<name x="290" y="-35">Evaluating</name>
+		</location>
+		<init ref="id84"/>
+		<transition id="id86">
+			<source ref="id84"/>
+			<target ref="id85"/>
+			<label kind="select" x="102" y="-59">i : truck_id</label>
+			<label kind="synchronisation" x="68" y="-42">requestApproval[i]?</label>
+			<label kind="assignment" x="110" y="-25">req_id = i</label>
+		</transition>
+		<transition id="id87">
+			<source ref="id85"/>
+			<target ref="id84"/>
+			<label kind="synchronisation" x="-93" y="144">operatorApproves[req_id]!</label>
+			<nail x="0" y="144"/>
+		</transition>
+		<transition id="id88">
+			<source ref="id85"/>
+			<target ref="id84"/>
+			<label kind="synchronisation" x="-59" y="-187">operatorRejects[req_id]!</label>
+			<nail x="0" y="-161"/>
+		</transition>
+		<transition id="id89">
+			<source ref="id84"/>
+			<target ref="id84"/>
+			<label kind="select" x="-289" y="-20">i : truck_id</label>
+			<label kind="synchronisation" x="-289" y="0">commWarning[i]?</label>
+			<nail x="-160" y="40"/>
+			<nail x="-160" y="-40"/>
+		</transition>
+		<transition id="id90">
+			<source ref="id84"/>
+			<target ref="id84"/>
+			<label kind="select" x="-280" y="-119">i : truck_id</label>
+			<label kind="synchronisation" x="-280" y="-99">commRejoin[i]?</label>
+			<nail x="-153" y="-51"/>
+			<nail x="-153" y="-110"/>
+		</transition>
+	</template>
+	<system>
+truck0 = FollowerTruck(0);
+truck1 = FollowerTruck(1);
+lead = LeadTruck();
+op = SafetyOperator();
+
+system truck0, truck1, lead, op;
+	</system>
+	<queries>
+		<query>
+			<formula>A[] not deadlock</formula>
+			<comment>The system can never freeze. The remaining member is always in SteadyState when predecessorLeft is broadcast (the lead serializes maneuvers), so the gap-closing handshake is always available.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:07 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (truck0.JOINING_SynchronizingSpeed imply (speed_dev[0] &lt;= 5 and speed_dev[0] &gt;= -5))</formula>
+			<comment>REQ-1.3.1: speed deviation never exceeds +/-0.5 m/s (scaled +/-5) during synchronization.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:08 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (truck0.JOINING_SynchronizingSpeed imply truck0.t &lt;= SYNC_TIMEOUT)</formula>
+			<comment>REQ-1.3.2: synchronization never runs longer than 3 s -- success (speedSynced) or abort (syncFailed) at the deadline.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:09 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (truck0.ACTIVE_PLATOONING_SteadyState imply truck0.v2x_clk &lt;= V2X_CYCLE)</formula>
+			<comment>REQ-1.2.3: never more than 20 ms (50 Hz) between V2X refreshes in steady state.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:10 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (truck0.ACTIVE_PLATOONING_ClosingGap imply truck0.v2x_clk &lt;= V2X_CYCLE)</formula>
+			<comment>REQ-1.2.3 during the gap maneuver: the closing truck is still a platoon member and keeps the 50 Hz exchange.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:11 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (truck0.ACTIVE_PLATOONING_SteadyState imply speed_dev[0] == 0)</formula>
+			<comment>Safety: a truck is only ever in steady-state platooning with zero speed deviation.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:12 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (truck0.JOINING_ValidatingConditions imply truck0.t &lt;= NOTIFICATION_LATENCY)</formula>
+			<comment>REQ-1.5.1: safety validation always completes within the 100 ms notification window.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:12 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (truck1.ACTIVE_PLATOONING_ClosingGap imply truck1.t &lt;= GAP_CLOSE_TIMEOUT)</formula>
+			<comment>REQ-1.6.2: the remaining member always closes the gap within 5 s of being notified of the predecessor's exit. Clock reset at predecessorLeft, enforced by the location invariant.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:13 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (lead.Idle imply members == 0)</formula>
+			<comment>Membership consistency: the lead is only idle when the platoon is empty. (Replaces the old mutual-exclusion query, which is now false by design -- multi-member platooning is exactly what enables gap closing.)</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:14 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; (truck0.ACTIVE_PLATOONING_SteadyState and truck1.ACTIVE_PLATOONING_SteadyState)</formula>
+			<comment>Reachability: a two-member platoon can form - the precondition for gap closing.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:14 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; truck1.ACTIVE_PLATOONING_ClosingGap</formula>
+			<comment>Reachability: the ClosingGap sub-state of Active Platooning is exercisable (truck0 joins, truck1 joins, truck0 leaves, truck1 closes the gap) - it is not dead code.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:14 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; (lead.Idle and truck0.Idle and truck1.Idle and current_gap == 4)</formula>
+			<comment>Full-cycle reachability: both trucks join, one leaves (the other closes the gap to 4 m), the last leaves, and the whole system returns to its initial locations.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:14 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; truck0.COMM_LinkLost</formula>
+			<comment>Communication-loss scenario (merged from truck_platoon_uppaal.xml): it is possible for truck0 to detect a missed-heartbeat link loss while platooning. Not yet verified.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:14 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (truck0.COMM_LinkLost imply truck0.ct &lt;= SAFE_MODE_DELAY)</formula>
+			<comment>Safety bound: once link loss is detected, the follower always falls back to safe/independent driving within SAFE_MODE_DELAY. Not yet verified.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:15 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; truck0.COMM_SafeMode</formula>
+			<comment>Reachability: the follower can actually reach the independent safe-driving fallback state. Not yet verified.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:15 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; (truck0.COMM_SafeMode and truck0.ct &lt; RECONNECT_LIMIT)</formula>
+			<comment>Reachability: a follower in safe/independent driving can still be within the reconnection window (the successful-rejoin path is exercisable). Not yet verified.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:15 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; truck0.COMM_GiveUp</formula>
+			<comment>Reachability: the reconnection window can expire, forcing truck0 to give up and exit the platoon unilaterally. Not yet verified.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:15 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>A[] (commActive &gt; 0 imply not leaveInProgress)</formula>
+			<comment>Serialization invariant: a coordinated voluntary-leave maneuver and comm-loss handling are mutually exclusive -- this is what removes the gap-closing deadlock. Not yet verified.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-10 20:10:16 +0200">
+			</result>
+		</query>
+		<query>
+			<formula/>
+			<comment/>
+		</query>
+	</queries>
+</nta>
