@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.6//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_6.dtd'>
+<nta>
+	<declaration>
+const int SEND_PERIOD = 1;
+const int TIMEOUT = 3;
+const int SAFE_DELAY = 1;
+const int RECONNECT_LIMIT = 5;
+
+broadcast chan data;
+broadcast chan warning;
+broadcast chan reconnect;
+broadcast chan rejoin;
+broadcast chan leave;
+</declaration>
+	<template>
+		<name>LeadTruck</name>
+		<declaration>
+clock x;
+</declaration>
+		<location id="id0" x="100" y="120">
+			<name x="110" y="68">SendingData</name>
+			<label kind="invariant" x="0" y="144">x &lt;= SEND_PERIOD</label>
+		</location>
+		<location id="id1" x="360" y="120">
+			<name x="345" y="90">Silent</name>
+		</location>
+		<location id="id2" x="360" y="300">
+			<name x="374" y="272">ProblemReported</name>
+		</location>
+		<init ref="id0"/>
+		<transition id="id3">
+			<source ref="id0"/>
+			<target ref="id0"/>
+			<label kind="guard" x="110" y="17">x &gt;= SEND_PERIOD</label>
+			<label kind="synchronisation" x="110" y="34">data!</label>
+			<label kind="assignment" x="110" y="51">x = 0</label>
+			<nail x="70" y="90"/>
+			<nail x="130" y="90"/>
+		</transition>
+		<transition id="id4">
+			<source ref="id0"/>
+			<target ref="id1"/>
+			<label kind="guard" x="195" y="130">x &gt;= SEND_PERIOD</label>
+			<label kind="assignment" x="195" y="150">x = 0</label>
+		</transition>
+		<transition id="id5">
+			<source ref="id1"/>
+			<target ref="id2"/>
+			<label kind="synchronisation" x="374" y="204">warning?</label>
+		</transition>
+		<transition id="id6">
+			<source ref="id2"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="190" y="260">rejoin?</label>
+			<label kind="assignment" x="190" y="280">x = 0</label>
+		</transition>
+		<transition id="id7">
+			<source ref="id2"/>
+			<target ref="id1"/>
+			<label kind="synchronisation" x="382" y="238">leave?</label>
+		</transition>
+	</template>
+	<template>
+		<name>AffectedFollowTruck</name>
+		<declaration>
+clock t;
+</declaration>
+		<location id="id8" x="80" y="100">
+			<name x="76" y="42">NormalDriving</name>
+		</location>
+		<location id="id9" x="330" y="100">
+			<name x="290" y="70">CommunicationLost</name>
+			<label kind="invariant" x="289" y="119">t &lt;= SAFE_DELAY</label>
+		</location>
+		<location id="id10" x="580" y="100">
+			<name x="555" y="70">SafeMode</name>
+		</location>
+		<location id="id11" x="580" y="300">
+			<name x="595" y="272">Reconnecting</name>
+			<label kind="invariant" x="467" y="340">t &lt;= RECONNECT_LIMIT</label>
+		</location>
+		<location id="id12" x="330" y="300">
+			<name x="314" y="263">Rejoined</name>
+		</location>
+		<location id="id13" x="830" y="300">
+			<name x="785" y="270">StandaloneDriving</name>
+		</location>
+		<init ref="id8"/>
+		<transition id="id14">
+			<source ref="id8"/>
+			<target ref="id8"/>
+			<label kind="synchronisation" x="76" y="8">data?</label>
+			<label kind="assignment" x="76" y="25">t = 0</label>
+			<nail x="50" y="70"/>
+			<nail x="110" y="70"/>
+		</transition>
+		<transition id="id15">
+			<source ref="id8"/>
+			<target ref="id9"/>
+			<label kind="guard" x="170" y="110">t &gt;= TIMEOUT</label>
+			<label kind="assignment" x="170" y="136">t = 0</label>
+		</transition>
+		<transition id="id16">
+			<source ref="id9"/>
+			<target ref="id10"/>
+			<label kind="guard" x="433" y="119">t &lt;= SAFE_DELAY</label>
+			<label kind="synchronisation" x="433" y="144">warning!</label>
+			<label kind="assignment" x="433" y="170">t = 0</label>
+		</transition>
+		<transition id="id17">
+			<source ref="id10"/>
+			<target ref="id11"/>
+			<label kind="synchronisation" x="605" y="190">reconnect!</label>
+			<label kind="assignment" x="605" y="210">t = 0</label>
+		</transition>
+		<transition id="id18">
+			<source ref="id11"/>
+			<target ref="id12"/>
+			<label kind="guard" x="357" y="306">t &lt; RECONNECT_LIMIT</label>
+			<label kind="synchronisation" x="357" y="331">rejoin!</label>
+		</transition>
+		<transition id="id19">
+			<source ref="id11"/>
+			<target ref="id13"/>
+			<label kind="guard" x="646" y="306">t &gt;= RECONNECT_LIMIT</label>
+			<label kind="synchronisation" x="646" y="331">leave!</label>
+		</transition>
+		<transition id="id20">
+			<source ref="id12"/>
+			<target ref="id8"/>
+			<label kind="assignment" x="180" y="220">t = 0</label>
+		</transition>
+	</template>
+	<template>
+		<name>FleetOperator</name>
+		<location id="id21" x="100" y="120">
+			<name x="75" y="90">Monitoring</name>
+		</location>
+		<location id="id22" x="360" y="120">
+			<name x="330" y="90">AlertReceived</name>
+		</location>
+		<init ref="id21"/>
+		<transition id="id23">
+			<source ref="id21"/>
+			<target ref="id22"/>
+			<label kind="synchronisation" x="190" y="145">warning?</label>
+		</transition>
+		<transition id="id24">
+			<source ref="id22"/>
+			<target ref="id21"/>
+			<label kind="synchronisation" x="187" y="170">rejoin?</label>
+		</transition>
+		<transition id="id25">
+			<source ref="id22"/>
+			<target ref="id21"/>
+			<label kind="synchronisation" x="187" y="195">leave?</label>
+		</transition>
+	</template>
+	<system>
+Lead = LeadTruck();
+Follow = AffectedFollowTruck();
+Operator = FleetOperator();
+
+system Lead, Follow, Operator;
+</system>
+	<queries>
+		<query>
+			<formula>E&lt;&gt; Follow.CommunicationLost</formula>
+			<comment>It is possible that the follow truck detects communication loss.</comment>
+			<result outcome="success" type="quality" timestamp="2026-06-11 22:39:31 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; Follow.SafeMode</formula>
+			<comment>It is possible that the follow truck enters safe mode.</comment>
+			<result outcome="success" type="quality" timestamp="2026-06-11 22:01:41 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; Follow.Rejoined</formula>
+			<comment>It is possible that the follow truck reconnects and rejoins.</comment>
+			<result outcome="success" type="quality" timestamp="2026-06-11 22:01:43 +0200">
+			</result>
+		</query>
+		<query>
+			<formula>E&lt;&gt; Follow.StandaloneDriving</formula>
+			<comment>It is possible that the follow truck leaves the platoon and drives independently.</comment>
+			<result outcome="success" type="quality" timestamp="2026-06-11 22:01:45 +0200">
+			</result>
+		</query>
+	</queries>
+</nta>
